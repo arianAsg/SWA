@@ -1,8 +1,8 @@
 import streamlit as st
 from accounting import (
-    init_db, add_transaction, get_all_transactions, finance_summary,
+    add_bank, add_check, add_payment_to_transaction, delete_transaction, get_banks, get_checks, get_payments_by_transaction, init_db, add_transaction, get_all_transactions, finance_summary,
     get_financial_reports, add_party, get_parties, add_sim_card,
-    get_sim_cards, migrate_db, update_sim_owner
+    get_sim_cards, migrate_db, update_sim_owner, update_transaction
 )
 from contract_generator import ContractGenerator
 import io
@@ -22,7 +22,7 @@ CONTRACT_TYPES = {
     "قرارداد خرید/صلح (با مفاد ویژه)": "خرید"
 }
 
-#migrate_db()
+migrate_db()
 CONTRACTS_FOLDER = "contracts"
 ARCHIVE_FILE = os.path.join(CONTRACTS_FOLDER, "archive.json")
 LOGO_FOLDER = "logo"
@@ -78,7 +78,8 @@ def sidebar_content():
         "تولید قرارداد سیم‌کارت",
         "🧾 حسابداری معاملات",
         "📱 مدیریت سیم کارت‌ها",
-        "👥 مدیریت مشتریان/فروشندگان"
+        "👥 مدیریت مشتریان/فروشندگان",
+        "🏦 مدیریت بانک‌ها"
     ]
     selected_menu = st.sidebar.radio("انتخاب بخش", menu_options)
     
@@ -246,29 +247,35 @@ def sim_management_tab():
 # ----------------- مدیریت مشتریان/فروشندگان ------------------
 def parties_management_tab():
     st.header("مدیریت مشتریان و فروشندگان")
-    
+
     tabs = st.tabs(["ثبت طرف حساب جدید", "لیست طرف‌های حساب"])
-    
+
     with tabs[0]:
         with st.form("party_form"):
             cols = st.columns(2)
             with cols[0]:
                 name = st.text_input("نام کامل*")
-                phone = st.text_input("تلفن*")
+                phone = st.text_input("تلفن ثابت")
+                mobile = st.text_input("شماره موبایل*")
                 national_id = st.text_input("کد ملی*")
+                initial_balance = st.number_input("مانده اولیه حساب (ریال)", min_value=0, step=1000)
             with cols[1]:
                 address = st.text_input("آدرس")
-                party_type = st.selectbox("نوع طرف حساب*", ["مشتری", "فروشنده", "سایر"])
+                party_type = st.selectbox("نوع طرف حساب*", ["مشتری", "همکار", "سایر"])
+                account_status = st.selectbox("وضعیت طرف حساب", ["طلبکار", "بدهکار"])
                 notes = st.text_area("توضیحات")
-            
+
             if st.form_submit_button("ثبت طرف حساب"):
-                if name and phone and national_id:
+                if name and mobile and national_id:
                     add_party(
                         name=name,
                         phone=phone,
+                        mobile=mobile,
                         national_id=national_id,
                         address=address,
                         party_type=party_type,
+                        account_status=account_status,
+                        initial_balance=initial_balance,
                         notes=notes
                     )
                     st.success("طرف حساب با موفقیت ثبت شد.")
@@ -297,147 +304,211 @@ def parties_management_tab():
 # ----------------- حسابداری معاملات ------------------
 def accounting_tab():
     st.title("🧾 حسابداری خرید و فروش سیم‌کارت")
-    
+
     tabs = st.tabs(["داشبورد", "ثبت تراکنش", "لیست تراکنش‌ها", "گزارشات مالی"])
-    
-    with tabs[0]:  # داشبورد
+
+    # ================== 📊 داشبورد ==================
+    with tabs[0]:
         st.subheader("خلاصه مالی")
         summary = finance_summary()
-        
         col1, col2, col3 = st.columns(3)
         col1.metric("موجودی کل", f"{summary['balance']:,} ریال")
         col2.metric("کل دریافتی‌ها", f"{summary['total_income']:,} ریال")
         col3.metric("کل پرداختی‌ها", f"{summary['total_outcome']:,} ریال")
-        
-        # نمودار گردشی ماهانه
+
         st.subheader("گردش مالی ماهانه")
         reports = get_financial_reports()
         if reports['monthly']:
-            df_monthly = pd.DataFrame(
-                reports['monthly'], 
-                columns=["ماه", "درآمد", "هزینه", "مانده"]
-            )
+            df_monthly = pd.DataFrame(reports['monthly'], columns=["ماه", "درآمد", "هزینه", "مانده"])
             st.line_chart(df_monthly.set_index("ماه"))
         else:
             st.info("داده‌ای برای نمایش وجود ندارد")
-    
-    with tabs[1]:  # ثبت تراکنش
+
+    # ================== 📝 ثبت تراکنش ==================
+    with tabs[1]:
         st.subheader("ثبت تراکنش جدید")
+
+        # فرم اصلی تراکنش
         with st.form("transaction_form"):
             cols = st.columns(2)
             with cols[0]:
-                tx_type = st.selectbox(
-                    "نوع تراکنش*",
-                    ["دریافت فروش", "پرداخت خرید", "دریافت وام", "پرداخت وام", "سایر"]
-                )
-                amount = st.number_input("مبلغ (ریال)*", min_value=0, step=10000)
-                
-                # انتخاب طرف حساب
+                tx_type = st.selectbox("نوع تراکنش*", ["دریافت فروش", "پرداخت خرید", "دریافت وام", "پرداخت وام", "سایر"])
                 parties = get_parties()
                 party_options = [""] + [f"{p['name']} ({p['type']})" for p in parties]
-                selected_party = st.selectbox("طرف حساب (اختیاری)", party_options)
-                
+                selected_party = st.selectbox("طرف حساب", party_options)
+
                 # انتخاب سیم کارت
                 sim_cards = get_sim_cards()
                 sim_options = [""] + [f"{sc['number']} ({sc['operator']})" for sc in sim_cards]
-                selected_sim = st.selectbox("سیم کارت مرتبط (اختیاری)", sim_options)
-            
+                selected_sim = st.selectbox("سیم کارت مرتبط", sim_options)
+
             with cols[1]:
-                # انتخاب قرارداد مرتبط
                 contract_choices = [""]
                 if os.path.exists(ARCHIVE_FILE):
                     with open(ARCHIVE_FILE, "r", encoding='utf-8') as fa:
                         archive_list = json.load(fa)
                         contract_choices += [f['filename'] for f in archive_list]
-                contract_file = st.selectbox("قرارداد مرتبط (اختیاری)", contract_choices)
-                
-                payment_method = st.selectbox(
-                    "روش پرداخت",
-                    ["", "نقدی", "کارت به کارت", "حواله بانکی", "چک"]
-                )
-                bank_account = st.text_input("شماره حساب/کارت (اختیاری)")
-                reference_number = st.text_input("شماره پیگیری (اختیاری)")
+                contract_file = st.selectbox("قرارداد مرتبط", contract_choices)
                 description = st.text_area("توضیحات")
-            
+
+            # پرداخت‌های چندگانه
+            if "payment_rows" not in st.session_state:
+                st.session_state["payment_rows"] = 1
+            if st.form_submit_button("➕ افزودن ردیف پرداخت", help="ابتدا روی این کلیک کن تا سطر جدید اضافه بشه"):
+                st.session_state["payment_rows"] += 1
+
+            payments_data = []
+            for i in range(st.session_state["payment_rows"]):
+                c = st.columns([2, 2, 2, 2, 3])
+                method = c[0].selectbox("روش پرداخت", ["نقدی", "کارت به کارت", "حواله بانکی", "چک"], key=f"pmethod_{i}")
+                amount_pm = c[1].number_input("مبلغ (ریال)", min_value=0, step=10000, key=f"pamount_{i}")
+                bank_acc = c[2].text_input("حساب/کارت", key=f"pbank_{i}")
+                ref_num = c[3].text_input("شماره پیگیری", key=f"pref_{i}")
+                notes_pm = c[4].text_input("توضیحات", key=f"pnotes_{i}")
+                payments_data.append((method, amount_pm, bank_acc, ref_num, notes_pm))
+
             if st.form_submit_button("ثبت تراکنش"):
-                if amount > 0:
-                    # یافتن ID طرف حساب
+                total_amount = sum(p[1] for p in payments_data)
+                if total_amount > 0:
+                    # پیدا کردن ID طرف حساب
                     party_id = None
                     if selected_party:
                         party_name = selected_party.split(" (")[0]
                         party_id = next((p["id"] for p in parties if p["name"] == party_name), None)
-                    
-                    # یافتن ID سیم کارت
+                    # پیدا کردن ID سیم کارت
                     sim_card_id = None
                     if selected_sim:
                         sim_number = selected_sim.split(" ")[0]
                         sim_card_id = next((sc["id"] for sc in sim_cards if sc["number"] == sim_number), None)
-                    
-                    add_transaction(
+
+                    tx_id = add_transaction(
                         tx_type=tx_type,
-                        amount=amount,
+                        amount=total_amount,
                         description=description,
                         contract_file=contract_file,
                         party_id=party_id,
-                        sim_card_id=sim_card_id,
-                        payment_method=payment_method,
-                        bank_account=bank_account,
-                        reference_number=reference_number
+                        sim_card_id=sim_card_id
                     )
-                    st.success("تراکنش با موفقیت ثبت شد.")
+                    for method, amount_pm, bank_acc, ref_num, notes_pm in payments_data:
+                        if amount_pm > 0:
+                            add_payment_to_transaction(tx_id, method, amount_pm, bank_acc, ref_num, notes_pm)
+
+                    st.success("تراکنش و پرداخت‌ها ثبت شدند.")
                     st.experimental_rerun()
                 else:
-                    st.error("مبلغ باید بیشتر از صفر باشد.")
-    
-    with tabs[2]:  # لیست تراکنش‌ها
+                    st.error("مجموع مبالغ پرداخت باید بیشتر از صفر باشد.")
+
+        # فرم سریع طرف حساب (جدا از فرم تراکنش)
+        with st.expander("➕ ثبت سریع طرف حساب جدید"):
+            with st.form("quick_party_form"):
+                quick_name = st.text_input("نام کامل")
+                quick_type = st.selectbox("نوع", ["مشتری", "همکار", "سایر"])
+                quick_mobile = st.text_input("شماره موبایل")
+                quick_national_id = st.text_input("کد ملی")
+                if st.form_submit_button("ثبت طرف حساب جدید"):
+                    if quick_name and quick_mobile and quick_national_id:
+                        add_party(name=quick_name, mobile=quick_mobile,
+                                  national_id=quick_national_id, party_type=quick_type)
+                        st.success("طرف حساب افزوده شد.")
+                        st.experimental_rerun()
+                    else:
+                        st.error("پر کردن نام، موبایل و کد ملی اجباری است.")
+
+    # ================== 📜 لیست تراکنش‌ها ==================
+    with tabs[2]:
         st.subheader("لیست تراکنش‌ها")
         transactions = get_all_transactions()
         if transactions:
-            df = pd.DataFrame(transactions)
-            st.dataframe(df)
-            
-            # دکمه دانلود
-            csv = df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="دانلود لیست تراکنش‌ها (CSV)",
-                data=csv,
-                file_name="transactions.csv",
-                mime="text/csv"
-            )
+            for tx in transactions:
+                st.markdown(f"**{tx['id']}** | {tx['tx_type']} | {tx['amount']:,} ریال")
+                payments = get_payments_by_transaction(tx['id'])
+                if payments:
+                    for p in payments:
+                        st.write(f"▫ {p['payment_method']}: {p['amount']:,} ریال ({p['bank_account']}) [{p['reference_number']}]")
+                cols = st.columns(2)
+                if cols[0].button("✏ ویرایش", key=f"edit_{tx['id']}"):
+                    st.warning("ویرایش تراکنش هنوز پیاده‌سازی نشده!")
+                if cols[1].button("🗑 حذف", key=f"del_{tx['id']}"):
+                    delete_transaction(tx['id'])
+                    st.warning("تراکنش حذف شد.")
+                    st.experimental_rerun()
         else:
-            st.info("هنوز تراکنشی ثبت نشده است.")
-    
-    with tabs[3]:  # گزارشات مالی
+            st.info("هیچ تراکنشی ثبت نشده.")
+
+    # ================== 📈 گزارشات مالی ==================
+    with tabs[3]:
         st.subheader("گزارشات مالی")
-        
-        # فیلتر تاریخ
         col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input("تاریخ شروع", value=None)
         with col2:
             end_date = st.date_input("تاریخ پایان", value=None)
-        
         if st.button("اعمال فیلتر"):
             start_str = start_date.strftime("%Y-%m-%d") if start_date else None
             end_str = end_date.strftime("%Y-%m-%d") if end_date else None
             reports = get_financial_reports(start_str, end_str)
         else:
             reports = get_financial_reports()
-        
-        # نمایش گزارش بر اساس اپراتور
         if reports['by_operator']:
             st.subheader("تراکنش‌ها بر اساس اپراتور")
-            df_operator = pd.DataFrame(
-                reports['by_operator'],
-                columns=["اپراتور", "تعداد تراکنش", "جمع مبلغ"]
-            )
+            df_operator = pd.DataFrame(reports['by_operator'], columns=["اپراتور", "تعداد تراکنش", "جمع مبلغ"])
             st.dataframe(df_operator)
-            
-            # نمودار میله‌ای
             st.bar_chart(df_operator.set_index("اپراتور")["جمع مبلغ"])
         else:
             st.info("تراکنشی مرتبط با سیم کارت‌ها وجود ندارد")
+def banks_management_tab():
+    st.header("🏦 مدیریت بانک‌ها")
 
+    with st.form("bank_form"):
+        name = st.text_input("نام بانک*")
+        account_number = st.text_input("شماره حساب/کارت*")
+        owner = st.text_input("نام صاحب حساب")
+        notes = st.text_area("توضیحات")
+        if st.form_submit_button("ثبت بانک"):
+            if name and account_number:
+                add_bank(name, account_number, owner, notes)
+                st.success("بانک ثبت شد.")
+                st.experimental_rerun()
+            else:
+                st.error("نام و شماره حساب اجباری است.")
+
+    st.subheader("لیست بانک‌ها")
+    banks = get_banks()
+    if banks:
+        df = pd.DataFrame(banks)
+        st.dataframe(df)
+    else:
+        st.info("هیچ بانکی ثبت نشده است.")
+def checks_management_tab():
+    st.header("📑 مدیریت چک‌ها")
+
+    with st.form("check_form"):
+        check_number = st.text_input("شماره چک*")
+        type_ = st.selectbox("نوع چک", ["دریافت", "پرداخت"])
+        banks = get_banks()
+        bank_options = [""] + [f"{b['name']} - {b['account_number']}" for b in banks]
+        selected_bank = st.selectbox("بانک*", bank_options)
+        amount = st.number_input("مبلغ (ریال)*", min_value=0, step=10000)
+        due_date = st.date_input("تاریخ سررسید")
+        status = st.selectbox("وضعیت", ["در جریان", "وصول شد", "برگشتی"])
+        notes = st.text_area("توضیحات")
+
+        if st.form_submit_button("ثبت چک"):
+            if check_number and selected_bank and amount > 0:
+                bank_id = next((b["id"] for b in banks if f"{b['name']} - {b['account_number']}" == selected_bank), None)
+                add_check(check_number, type_, bank_id, amount, due_date.strftime("%Y-%m-%d"), status, notes)
+                st.success("چک با موفقیت ثبت شد.")
+                st.experimental_rerun()
+            else:
+                st.error("فیلدهای ستاره‌دار را پر کنید.")
+
+    st.subheader("لیست چک‌ها")
+    chs = get_checks()
+    if chs:
+        df = pd.DataFrame(chs)
+        st.dataframe(df)
+    else:
+        st.info("هیچ چکی ثبت نشده است.")
 # ----------------- تولید قرارداد ------------------
 def generate_contract(contract_type, contract_data):
     if CONTRACT_TYPES[contract_type] == "فروش":

@@ -10,19 +10,24 @@ def get_connection():
 def init_db():
     con = get_connection()
     cur = con.cursor()
-    
+
+    # جدول طرف حساب‌ها
     cur.execute('''
         CREATE TABLE IF NOT EXISTS parties (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             phone TEXT,
-            national_id TEXT,
+            mobile TEXT,
+            national_id TEXT NOT NULL,
             address TEXT,
-            type TEXT CHECK(type IN ('مشتری', 'فروشنده', 'سایر')),
+            type TEXT CHECK(type IN ('مشتری', 'همکار', 'سایر')),
+            account_status TEXT CHECK(account_status IN ('طلبکار', 'بدهکار')),
+            initial_balance INTEGER DEFAULT 0,
             notes TEXT
         )
     ''')
-    
+
+    # جدول سیم کارت‌ها
     cur.execute('''
         CREATE TABLE IF NOT EXISTS sim_cards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,64 +43,113 @@ def init_db():
             FOREIGN KEY (current_owner_id) REFERENCES parties(id)
         )
     ''')
-    
+
+    # جدول تراکنش‌ها
     cur.execute('''
-      CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tx_type TEXT,
-        amount INTEGER,
-        shamsi_datetime TEXT,
-        description TEXT,
-        contract_file TEXT,
-        party_id INTEGER,
-        sim_card_id INTEGER,
-        payment_method TEXT,
-        bank_account TEXT,
-        reference_number TEXT,
-        FOREIGN KEY (party_id) REFERENCES parties(id),
-        FOREIGN KEY (sim_card_id) REFERENCES sim_cards(id)
-      )
-    ''')
-    
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS bank_accounts (
+        CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bank_name TEXT NOT NULL,
-            account_number TEXT NOT NULL,
-            account_holder TEXT,
-            current_balance INTEGER DEFAULT 0,
-            notes TEXT
+            tx_type TEXT,
+            amount INTEGER,
+            shamsi_datetime TEXT,
+            description TEXT,
+            contract_file TEXT,
+            party_id INTEGER,
+            sim_card_id INTEGER,
+            payment_method TEXT,
+            bank_account TEXT,
+            reference_number TEXT,
+            FOREIGN KEY (party_id) REFERENCES parties(id),
+            FOREIGN KEY (sim_card_id) REFERENCES sim_cards(id)
         )
     ''')
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            check_number TEXT NOT NULL,
+            type TEXT CHECK(type IN ('دریافت', 'پرداخت')),
+            bank_id INTEGER,
+            amount INTEGER NOT NULL,
+            due_date TEXT,
+            status TEXT CHECK(status IN ('در جریان', 'وصول شد', 'برگشتی')),
+            notes TEXT,
+            FOREIGN KEY (bank_id) REFERENCES banks(id)
+        )
+    """)
+
+    # جدول پرداخت‌های متعدد
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS transaction_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id INTEGER,
+            payment_method TEXT,
+            amount INTEGER,
+            bank_account TEXT,
+            reference_number TEXT,
+            notes TEXT,
+            FOREIGN KEY (transaction_id) REFERENCES transactions(id)
+        )
+    """)
+
+
 
     con.commit()
     con.close()
 
-def add_transaction(
-    tx_type: str,
-    amount: int,
-    description: str = "",
-    contract_file: str = "",
-    party_id: Optional[int] = None,
-    sim_card_id: Optional[int] = None,
-    payment_method: str = "",
-    bank_account: str = "",
-    reference_number: str = ""
-):
-    shamsi_now = jdatetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+def migrate_db_v2():
+    """ایجاد جدول بانک‌ها در صورت نبودن"""
     con = get_connection()
     cur = con.cursor()
-    cur.execute('''
-        INSERT INTO transactions
-        (tx_type, amount, shamsi_datetime, description, contract_file, 
-         party_id, sim_card_id, payment_method, bank_account, reference_number)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (tx_type, amount, shamsi_now, description, contract_file, 
-          party_id, sim_card_id, payment_method, bank_account, reference_number))
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS banks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            account_number TEXT NOT NULL,
+            owner TEXT,
+            notes TEXT
+        )
+    """)
+
     con.commit()
     con.close()
 
-def get_all_transactions() -> List[Dict]:
+
+def add_transaction(tx_type, amount, description="", contract_file="", party_id=None, sim_card_id=None, payment_method="", bank_account="", reference_number=""):
+    con = get_connection()
+    cur = con.cursor()
+    shamsi_datetime = jdatetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cur.execute('''
+        INSERT INTO transactions 
+        (tx_type, amount, shamsi_datetime, description, contract_file, party_id, sim_card_id, payment_method, bank_account, reference_number)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (tx_type, amount, shamsi_datetime, description, contract_file, party_id, sim_card_id, payment_method, bank_account, reference_number))
+    con.commit()
+    con.close()
+
+def get_all_transactions():
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM transactions ORDER BY id DESC")
+    rows = cur.fetchall()
+    cols = [c[0] for c in cur.description]
+    con.close()
+    return [dict(zip(cols, r)) for r in rows]
+
+def update_transaction(tx_id, tx_type, amount, description):
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("""
+        UPDATE transactions SET tx_type=?, amount=?, description=? WHERE id=?
+    """, (tx_type, amount, description, tx_id))
+    con.commit()
+    con.close()
+
+def delete_transaction(tx_id):
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("DELETE FROM transactions WHERE id=?", (tx_id,))
+    con.commit()
+    con.close()
     con = get_connection()
     cur = con.cursor()
     cur.execute('''
@@ -181,25 +235,25 @@ def get_financial_reports(start_date=None, end_date=None):
         'by_operator': by_operator
     }
 
-def add_party(name: str, phone: str = "", national_id: str = "", 
-              address: str = "", party_type: str = "مشتری", notes: str = ""):
+def add_party(name, phone="", mobile="", national_id="", address="", party_type="مشتری", account_status="طلبکار", initial_balance=0, notes=""):
     con = get_connection()
     cur = con.cursor()
     cur.execute('''
-        INSERT INTO parties 
-        (name, phone, national_id, address, type, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (name, phone, national_id, address, party_type, notes))
+        INSERT INTO parties (name, phone, mobile, national_id, address, type, account_status, initial_balance, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (name, phone, mobile, national_id, address, party_type, account_status, initial_balance, notes))
     con.commit()
     con.close()
 
 def get_parties():
     con = get_connection()
     cur = con.cursor()
-    cur.execute('SELECT id, name, phone, national_id, type FROM parties ORDER BY name')
+    cur.execute("SELECT * FROM parties")
     rows = cur.fetchall()
+    cols = [c[0] for c in cur.description]
     con.close()
-    return [{"id": row[0], "name": row[1], "phone": row[2], "national_id": row[3], "type": row[4]} for row in rows]
+    return [dict(zip(cols, r)) for r in rows]
+
 
 def add_sim_card(
     number: str,
@@ -253,22 +307,127 @@ def update_sim_owner(sim_id: int, new_owner_id: Optional[int], sale_price: Optio
     con.commit()
     con.close()
 
+# ===== مدیریت بانک‌ها =====
+def add_bank(name, account_number, owner="", notes=""):
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("""
+        INSERT INTO banks (name, account_number, owner, notes)
+        VALUES (?, ?, ?, ?)
+    """, (name, account_number, owner, notes))
+    con.commit()
+    con.close()
 
+def get_banks():
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM banks")
+    rows = cur.fetchall()
+    cols = [c[0] for c in cur.description]
+    con.close()
+    return [dict(zip(cols, r)) for r in rows]
 
+def add_check(check_number, type, bank_id, amount, due_date, status="در جریان", notes=""):
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("""
+        INSERT INTO checks (check_number, type, bank_id, amount, due_date, status, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (check_number, type, bank_id, amount, due_date, status, notes))
+    con.commit()
+    con.close()
+
+def get_checks():
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM checks ORDER BY id DESC")
+    rows = cur.fetchall()
+    cols = [c[0] for c in cur.description]
+    con.close()
+    return [dict(zip(cols, r)) for r in rows]
+
+def update_check(check_id, **kwargs):
+    con = get_connection()
+    cur = con.cursor()
+    fields = ", ".join([f"{k}=?" for k in kwargs.keys()])
+    cur.execute(f"UPDATE checks SET {fields} WHERE id=?", (*kwargs.values(), check_id))
+    con.commit()
+    con.close()
+
+def delete_check(check_id):
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("DELETE FROM checks WHERE id=?", (check_id,))
+    con.commit()
+    con.close()
+
+# ===== پرداخت‌های چندگانه =====
+def add_payment_to_transaction(transaction_id, payment_method, amount, bank_account="", reference_number="", notes=""):
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("""
+        INSERT INTO transaction_payments
+        (transaction_id, payment_method, amount, bank_account, reference_number, notes)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (transaction_id, payment_method, amount, bank_account, reference_number, notes))
+    con.commit()
+    con.close()
+
+def get_payments_by_transaction(transaction_id):
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM transaction_payments WHERE transaction_id=?", (transaction_id,))
+    rows = cur.fetchall()
+    cols = [c[0] for c in cur.description]
+    con.close()
+    return [dict(zip(cols, r)) for r in rows]
+
+def delete_payment(payment_id):
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("DELETE FROM transaction_payments WHERE id=?", (payment_id,))
+    con.commit()
+    con.close()
 
 def migrate_db():
     con = get_connection()
     cur = con.cursor()
-    
+
+    # تغییر نوع ستون type
     try:
-        # اضافه کردن ستون‌های جدید اگر وجود ندارند
-        cur.execute("ALTER TABLE transactions ADD COLUMN payment_method TEXT")
-        cur.execute("ALTER TABLE transactions ADD COLUMN bank_account TEXT")
-        cur.execute("ALTER TABLE transactions ADD COLUMN reference_number TEXT")
-        cur.execute("ALTER TABLE transactions ADD COLUMN party_id INTEGER")
-        cur.execute("ALTER TABLE transactions ADD COLUMN sim_card_id INTEGER")
-    except sqlite3.OperationalError as e:
-        print(f"Migration warning: {e}")
-    
+        cur.execute("""
+            ALTER TABLE parties RENAME TO parties_old
+        """)
+        cur.execute('''
+            CREATE TABLE parties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                phone TEXT,
+                mobile TEXT NOT NULL,
+                national_id TEXT NOT NULL,
+                address TEXT,
+                type TEXT CHECK(type IN ('مشتری', 'همکار', 'سایر')),
+                account_status TEXT CHECK(account_status IN ('طلبکار', 'بدهکار')),
+                initial_balance INTEGER DEFAULT 0,
+                notes TEXT
+            )
+        ''')
+        cur.execute('''
+            INSERT INTO parties (id, name, phone, mobile, national_id, address, type, notes)
+            SELECT id, name, phone, '' as mobile, national_id, address,
+                   CASE WHEN type='فروشنده' THEN 'همکار' ELSE type END as type,
+                   notes
+            FROM parties_old
+        ''')
+        cur.execute("DROP TABLE parties_old")
+    except sqlite3.OperationalError:
+        # اضافه کردن ستون‌ها به جدول قدیمی، اگر وجود نداشتند
+        try: cur.execute("ALTER TABLE parties ADD COLUMN mobile TEXT")
+        except: pass
+        try: cur.execute("ALTER TABLE parties ADD COLUMN account_status TEXT")
+        except: pass
+        try: cur.execute("ALTER TABLE parties ADD COLUMN initial_balance INTEGER DEFAULT 0")
+        except: pass
+
     con.commit()
     con.close()
